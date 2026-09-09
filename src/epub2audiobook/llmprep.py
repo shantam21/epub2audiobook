@@ -85,7 +85,8 @@ class LLMPrepper:
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise LLMPrepError(
                 "The LLM pre-pass needs the anthropic package. "
-                "Install it with: pip install 'epub2audiobook[llm]'"
+                "Install it with: uv sync --extra llm "
+                "(or: pip install 'epub2audiobook[llm]')"
             ) from exc
 
         self._anthropic = anthropic

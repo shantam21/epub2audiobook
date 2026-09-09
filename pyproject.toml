@@ -17,15 +17,22 @@ dependencies = [
     "numpy>=1.26",
     "typer>=0.12",
     "rich>=13.7",
-]
-
-[project.optional-dependencies]
-llm = ["anthropic>=0.49"]
-web = [
+    # The web UI ships with the tool rather than as an extra. uv re-syncs
+    # before every `uv run`, and an extra would be pruned by a plain
+    # `uv run epub2ab serve` -- breaking the command that needs it. These are
+    # a few MB next to PyTorch, so there is nothing to save by hiding them.
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
 ]
+
+[project.optional-dependencies]
+# Opt-in: only useful if you have an Anthropic API key.
+llm = ["anthropic>=0.49"]
+
+# Dev tooling is a dependency group, not an extra: it is for people working on
+# the project, never for people installing it. `uv sync` picks it up by default.
+[dependency-groups]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [project.scripts]

@@ -391,6 +391,9 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="Bind address. Localhost by default."),
     port: int = typer.Option(8000, help="Port to listen on."),
     reload: bool = typer.Option(False, help="Auto-reload on code changes (development)."),
+    log_level: str = typer.Option(
+        "info", help="uvicorn log level: critical, error, warning, info, debug, trace."
+    ),
 ) -> None:
     """Run the web UI: upload a book, pick a voice, watch progress in a browser."""
     try:
@@ -398,7 +401,8 @@ def serve(
     except ImportError:
         console.print(
             "[red]The web UI needs extra packages.[/red]\n"
-            "Install them with: pip install 'epub2audiobook[web]'"
+            "Run `uv sync` in the project to install them "
+            "(or: pip install fastapi uvicorn python-multipart)"
         )
         raise typer.Exit(1)
 
@@ -407,15 +411,51 @@ def serve(
     root = data_dir or (Path.home() / "epub2audiobook")
     root.mkdir(parents=True, exist_ok=True)
 
+    # Fail loudly and specifically here. Left to uvicorn, a busy port raises
+    # deep inside asyncio and, at a quiet log level, prints nothing at all.
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError as exc:
+        console.print(
+            f"[red]Cannot listen on {host}:{port} - {exc}[/red]\n"
+            f"Something is already using that port (very likely another "
+            f"`epub2ab serve`).\n"
+            f"Use a different one with [bold]--port {port + 1}[/bold], or stop the "
+            f"other server first."
+        )
+        raise typer.Exit(1)
+    finally:
+        probe.close()
+
     console.print(
         Panel.fit(
             f"[bold]epub2audiobook[/bold]\n\n"
             f"Open [cyan]http://{host}:{port}[/cyan]\n"
-            f"Jobs directory: {root}",
+            f"Jobs directory: {root}\n\n"
+            f"[dim]Conversions run as separate processes; their output goes to\n"
+            f"<job>/convert.log, and failures are reported here.[/dim]",
             title="Web UI",
         )
     )
-    uvicorn.run(create_app(root), host=host, port=port, reload=reload, log_level="warning")
+
+    def report(message: str) -> None:
+        colour = "red" if "FAILED" in message else "cyan"
+        console.print(f"[{colour}]{message}[/{colour}]")
+
+    try:
+        uvicorn.run(
+            create_app(root, on_event=report),
+            host=host,
+            port=port,
+            reload=reload,
+            log_level=log_level,
+        )
+    except Exception as exc:  # never exit silently
+        console.print(f"[red]The server stopped with an error: {exc!r}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()

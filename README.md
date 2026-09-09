@@ -12,17 +12,17 @@ reboot, and pick up exactly where you left off — down to the individual chunk.
 start.
 
 ```bash
-epub2ab serve                                  # web UI at localhost:8000
+uv run epub2ab serve                           # web UI at localhost:8000
 ```
 
 or from the terminal:
 
 ```bash
-epub2ab inspect  book.epub                 # what's in it, how long it'll run
-epub2ab sample   book.epub --voice bm_george   # audition a narrator first
-epub2ab convert  book.epub --voice af_heart    # convert (re-run to resume)
-epub2ab status   ./book                        # how far along am I
-epub2ab resume   ./book                        # continue after an interruption
+uv run epub2ab inspect book.epub                    # what's in it, how long it'll run
+uv run epub2ab sample  book.epub --voice bm_george  # audition a narrator first
+uv run epub2ab convert book.epub --voice af_heart   # convert (re-run to resume)
+uv run epub2ab status  ./book                       # how far along am I
+uv run epub2ab resume  ./book                       # continue after an interruption
 ```
 
 ## The web UI
@@ -32,8 +32,7 @@ long the audiobook will run, pick a voice, and watch per-chapter progress bars
 fill in. When it finishes, download the `.m4b` from the same page.
 
 ```bash
-pip install -e ".[web]"
-epub2ab serve --data-dir ~/audiobooks
+uv run epub2ab serve --data-dir ~/audiobooks
 ```
 
 The server never loads the TTS model. It launches the CLI as a subprocess and
@@ -59,41 +58,89 @@ npm run build   # writes into src/epub2audiobook/server/static/
 
 ## Install
 
-Two things have to be on your machine first.
-
-**1. Python 3.10–3.12.** Kokoro depends on PyTorch, which has no wheels for
-Python 3.13+ yet — on 3.14 pip tries to compile NumPy from source and fails.
-
-```bash
-winget install Python.Python.3.12
-```
-
-**2. ffmpeg**, used to encode and mux the final `.m4b`:
+The project uses [uv](https://docs.astral.sh/uv/). It resolves and installs the
+whole dependency tree — PyTorch included — in about two minutes from a cold
+cache, and it fetches the right Python for you, so there is no separate Python
+install step.
 
 ```bash
-winget install Gyan.FFmpeg
+winget install astral-sh.uv          # or: curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone https://github.com/shantam21/epub2audiobook
+cd epub2audiobook
+uv sync
 ```
 
-**3. A current Visual C++ runtime**, on Windows. PyTorch needs 14.40 or newer,
-and a machine that has only ever had Visual Studio 2017 on it will be on 14.13
-— which fails at import with a `c10.dll` initialization error:
+That is the whole setup. `uv sync` reads `.python-version`, downloads CPython
+3.12 if you don't have it, creates `.venv`, and installs everything from
+`uv.lock` at the exact pinned versions — including the web UI.
+
+The optional Claude pre-pass is the one thing kept out of the default install,
+since it is only useful with an API key: `uv sync --extra llm`.
+
+On Windows PowerShell, you can activate the environment explicitly with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks the activation script, allow locally created scripts once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+For Command Prompt (`cmd.exe`), use `.venv\Scripts\activate.bat` instead.
+When the environment is active, `(.venv)` appears at the start of your prompt.
+Leave it with `deactivate`.
+
+Then run commands through `uv run`, which needs no activated shell:
+
+```bash
+uv run epub2ab serve
+uv run epub2ab convert book.epub
+uv run pytest
+```
+
+**Why Python 3.12 and not newer:** Kokoro depends on PyTorch, which has no
+wheels for 3.13+. On 3.14, pip falls back to compiling NumPy from source and
+fails. `requires-python` and `.python-version` pin this so you can't hit it.
+
+### One other thing you need
+
+**ffmpeg**, used to encode and mux the final `.m4b`:
+
+```bash
+winget install Gyan.FFmpeg        # macOS: brew install ffmpeg
+```
+
+**On Windows, also check your Visual C++ runtime.** PyTorch needs 14.40 or
+newer; a machine that only ever had Visual Studio 2017 will be on 14.13 and
+`import torch` dies with a `c10.dll` initialization error:
 
 ```bash
 winget install Microsoft.VCRedist.2015+.x64
 ```
 
-Open a new terminal afterwards so `PATH` picks everything up. Then:
+Open a new terminal afterwards so `PATH` picks everything up.
+
+### Installing it as a tool
+
+To use `epub2ab` anywhere without cloning:
 
 ```bash
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -e .
+uv tool install "epub2audiobook @ git+https://github.com/shantam21/epub2audiobook"
 ```
 
-Add the optional Claude pre-pass (see below) with `pip install -e ".[llm]"`.
+### Without uv
 
-The first `convert` or `sample` downloads the Kokoro weights (~350 MB) into the
-usual Hugging Face cache. That happens once.
+`pip install -e ".[llm]"` still works on a Python 3.10–3.12 environment you
+made yourself. It is just considerably slower, and you get no lockfile.
+
+The first `convert` or `sample` pulls two things the lockfile cannot cover,
+because they are model data rather than packages: the Kokoro weights (~350 MB)
+into the Hugging Face cache, and spaCy's `en_core_web_sm` (~12 MB), which
+Kokoro's text frontend fetches itself. Both happen once, and both need network
+access on that first run.
 
 Kokoro falls back to **espeak-ng** for words outside its dictionary; the
 `espeakng-loader` package bundled with it supplies that on Windows, so no
@@ -315,7 +362,27 @@ src/epub2audiobook/
   server/         FastAPI backend + built React UI
 frontend/         React + TypeScript source (Vite)
 tests/            114 tests
+uv.lock           exact pinned versions for every dependency
+.python-version   3.12, because PyTorch has no 3.13+ wheels
 ```
+
+## Development
+
+```bash
+uv sync --all-extras     # or --frozen in CI, to fail on a stale lock
+uv run pytest
+uv add <package>         # updates pyproject.toml and uv.lock together
+uv lock --upgrade        # refresh the lock
+```
+
+Note that `uv run` re-syncs the environment before every command, which prunes
+anything not in the current dependency set. That is why the web UI is a real
+dependency rather than an extra: as an extra, a plain `uv run epub2ab serve`
+would have uninstalled FastAPI and then failed on the missing import.
+
+CI runs the test suite on Linux and Windows with `--frozen`, so a dependency
+change that was never locked cannot reach `main`, and rebuilds the front end to
+check the committed bundle matches its source.
 
 ## Job directory layout
 

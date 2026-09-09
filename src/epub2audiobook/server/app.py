@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -35,8 +36,8 @@ class StartRequest(BaseModel):
     keep_front_matter: bool = False
 
 
-def create_app(data_dir: Path) -> FastAPI:
-    manager = JobManager(data_dir)
+def create_app(data_dir: Path, on_event: Callable[[str], None] | None = None) -> FastAPI:
+    manager = JobManager(data_dir, on_event=on_event)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -89,7 +90,23 @@ def create_app(data_dir: Path) -> FastAPI:
             raise HTTPException(400, "That does not look like an EPUB (not a zip archive).")
 
         job_id = manager.create(data, file.filename)
-        return {"id": job_id} | _inspect(manager.job_dir(job_id) / "source.epub")
+        try:
+            details = _inspect(manager.job_dir(job_id) / "source.epub")
+        except Exception as exc:
+            # A file that is a zip but not a readable EPUB got this far. Don't
+            # leave a job directory behind that can never be converted.
+            manager.delete(job_id)
+            raise HTTPException(
+                400, f"That file could not be read as an EPUB: {exc}"
+            ) from exc
+        if not details["chapters"]:
+            manager.delete(job_id)
+            raise HTTPException(
+                400,
+                "No readable chapters were found in that EPUB. It may be "
+                "image-only (a scanned book), or DRM-protected.",
+            )
+        return {"id": job_id} | details
 
     @app.get("/api/jobs/{job_id}/inspect")
     def inspect_job(job_id: str) -> dict:

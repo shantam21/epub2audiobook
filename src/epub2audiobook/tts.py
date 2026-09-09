@@ -56,7 +56,8 @@ class KokoroEngine:
             from kokoro import KPipeline
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise TTSError(
-                "Kokoro is not installed. Install it with: pip install kokoro soundfile"
+                "Kokoro is not installed. Run `uv sync` in the project, "
+                "or: pip install kokoro soundfile"
             ) from exc
         except OSError as exc:  # pragma: no cover - platform guard
             # Almost always PyTorch failing to load its own DLLs on Windows.

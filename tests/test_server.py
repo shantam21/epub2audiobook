@@ -181,6 +181,12 @@ class TestLifecycle:
             def poll(self):
                 return None
 
+            def wait(self):
+                # The manager reaps every process it starts, so a stub that
+                # cannot be waited on throws in that background thread.
+                self.returncode = 0
+                return 0
+
         monkeypatch.setattr("epub2audiobook.server.jobs.subprocess.Popen", FakePopen)
         r = c.post(
             "/api/jobs/A Book/start",
@@ -216,3 +222,110 @@ class TestEvents:
                     assert payload["id"] == "A Book"
                     assert payload["state"] == "done"
                     break
+
+
+class TestFailureReporting:
+    """A conversion runs in a subprocess whose output goes to a log file. If
+    the server does not report failures, the terminal shows nothing at all."""
+
+    def test_a_failed_conversion_is_reported_with_its_log(self, tmp_path):
+        seen: list[str] = []
+        manager = JobManager(tmp_path, on_event=seen.append)
+        path = seed_job(tmp_path, "Bad Book")
+        (path / "convert.log").write_text("Traceback...\nValueError: broken\n", encoding="utf-8")
+
+        # A command that exits non-zero immediately, standing in for a
+        # conversion that dies on startup.
+        import subprocess
+        import sys
+
+        real_popen = subprocess.Popen
+
+        def failing(cmd, **kwargs):
+            return real_popen([sys.executable, "-c", "import sys; sys.exit(3)"], **kwargs)
+
+        subprocess.Popen = failing
+        try:
+            manager.start("Bad Book", voice="af_heart", speed=1.0, only=None,
+                          workers=1, llm=False, keep_front_matter=False)
+            for _ in range(100):
+                if any("FAILED" in m for m in seen):
+                    break
+                time.sleep(0.05)
+        finally:
+            subprocess.Popen = real_popen
+
+        failure = next((m for m in seen if "FAILED" in m), None)
+        assert failure is not None, f"no failure reported; saw {seen}"
+        assert "exit code 3" in failure
+        assert "Bad Book" in failure
+
+    def test_a_start_is_announced(self, tmp_path):
+        seen: list[str] = []
+        manager = JobManager(tmp_path, on_event=seen.append)
+        seed_job(tmp_path, "Book")
+
+        import subprocess
+        import sys
+
+        real_popen = subprocess.Popen
+
+        def ok(cmd, **kwargs):
+            return real_popen([sys.executable, "-c", "pass"], **kwargs)
+
+        subprocess.Popen = ok
+        try:
+            manager.start("Book", voice="bm_george", speed=1.0, only=None,
+                          workers=2, llm=False, keep_front_matter=False)
+        finally:
+            subprocess.Popen = real_popen
+
+        assert any("started" in m and "bm_george" in m for m in seen), seen
+
+    def test_a_deliberate_stop_is_not_reported_as_a_failure(self, tmp_path):
+        seen: list[str] = []
+        manager = JobManager(tmp_path, on_event=seen.append)
+        seed_job(tmp_path, "Book")
+
+        import subprocess
+        import sys
+
+        real_popen = subprocess.Popen
+
+        def sleeper(cmd, **kwargs):
+            return real_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+
+        subprocess.Popen = sleeper
+        try:
+            manager.start("Book", voice="af_heart", speed=1.0, only=None,
+                          workers=1, llm=False, keep_front_matter=False)
+            time.sleep(0.5)
+            manager.stop("Book")
+            for _ in range(100):
+                if any("stopped" in m for m in seen):
+                    break
+                time.sleep(0.05)
+        finally:
+            subprocess.Popen = real_popen
+
+        assert any("stopped by request" in m for m in seen), seen
+        assert not any("FAILED" in m for m in seen), seen
+
+
+class TestBadEpubUpload:
+    """A zip that is not a readable EPUB got past the magic-bytes check and
+    produced a 500 plus an orphaned job directory."""
+
+    def test_a_corrupt_epub_is_a_clean_400(self, client):
+        c, _ = client
+        bad = b"PK\x03\x04" + b"padding that is not a real zip archive" * 3
+        r = c.post("/api/jobs", files={"file": ("book.epub", bad, "application/epub+zip")})
+        assert r.status_code == 400
+        assert "could not be read" in r.json()["detail"]
+
+    def test_it_leaves_no_orphaned_job_behind(self, client):
+        c, root = client
+        bad = b"PK\x03\x04" + b"padding that is not a real zip archive" * 3
+        c.post("/api/jobs", files={"file": ("book.epub", bad, "application/epub+zip")})
+        assert c.get("/api/jobs").json()["jobs"] == []
+        assert not (root / "book").exists()

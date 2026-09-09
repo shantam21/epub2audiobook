@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,11 +70,15 @@ class JobSummary:
 class JobManager:
     """Owns the jobs directory and any running conversion processes."""
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, on_event: Callable[[str], None] | None = None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._procs: dict[str, JobProcess] = {}
         self._lock = threading.Lock()
+        # Conversions run in subprocesses whose output goes to the job's log
+        # file. Without this callback a failure is invisible from the terminal
+        # that started the server, which is the worst way to debug anything.
+        self._on_event = on_event or (lambda _msg: None)
 
     # -- discovery ---------------------------------------------------------
 
@@ -225,6 +230,34 @@ class JobManager:
         )
         with self._lock:
             self._procs[job_id] = JobProcess(popen, time.time(), log_path)
+
+        self._on_event(f"[{job_id}] started (pid {popen.pid}, voice {voice}, {workers or 'auto'} workers)")
+        threading.Thread(
+            target=self._reap, args=(job_id, popen, log_path, log), daemon=True
+        ).start()
+
+    def _reap(self, job_id: str, popen: subprocess.Popen, log_path: Path, handle) -> None:
+        """Wait for a conversion and report how it ended, to the server console."""
+        code = popen.wait()
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+        with self._lock:
+            proc = self._procs.get(job_id)
+        if proc is not None and proc.stopping:
+            self._on_event(f"[{job_id}] stopped by request")
+            return
+        if code == 0:
+            self._on_event(f"[{job_id}] finished")
+            return
+
+        tail = _tail(log_path, 15)
+        self._on_event(
+            f"[{job_id}] FAILED with exit code {code}. Last lines of "
+            f"{log_path}:\n{tail}"
+        )
 
     def stop(self, job_id: str) -> bool:
         with self._lock:
