@@ -152,6 +152,24 @@ Only synthesis is parallel. Every database write still happens in the parent
 process, so SQLite keeps exactly one writer and the resume guarantee below is
 unchanged.
 
+### If it suddenly gets slow
+
+Free memory is measured when the run *starts*, but a render takes hours and
+other applications grow in the meantime. If memory gets tight, the OS trims the
+workers' resident sets and they begin paging — throughput collapses by roughly
+an order of magnitude with no error message and no failed chunks.
+
+Observed on a 10 GB machine: two workers held ~6.5 chunks/min with 3.5 GB free,
+then fell to ~0.9 chunks/min once an editor and a browser had taken free memory
+down to 0.9 GB. The fix is to stop and restart with fewer workers:
+
+```bash
+epub2ab resume ./book --workers 1
+```
+
+Nothing is lost — the restart resumes from the last finished chunk. One worker
+that stays resident beats two that are swapping.
+
 ## Resuming
 
 Every chapter's text prep and every individual TTS chunk is a row in a SQLite

@@ -680,6 +680,20 @@ def _render(
         f"x {threads} thread{'s' if threads > 1 else ''}."
     )
 
+    # Free memory can fall a long way during a multi-hour render as other
+    # applications grow. When it does, Windows trims the workers' resident sets
+    # and they page instead of synthesising -- throughput collapses without any
+    # error. Say so up front, since the symptom looks nothing like the cause.
+    free = rnd._available_gb()
+    if workers > 1 and free < workers * rnd.WORKER_RAM_GB:
+        console.print(
+            f"[yellow]Only {free:.1f} GB of memory is free, and {workers} workers "
+            f"want about {workers * rnd.WORKER_RAM_GB:.1f} GB.[/yellow]\n"
+            "[yellow]If throughput drops off sharply, close some applications or "
+            "re-run with --workers 1; one worker beats two that are swapping."
+            "[/yellow]"
+        )
+
     def finish(result) -> None:
         """Record one chunk. Runs only in the parent, so SQLite stays single-writer."""
         if result.error:
