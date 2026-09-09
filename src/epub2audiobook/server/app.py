@@ -26,6 +26,11 @@ from .jobs import JobManager
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
+# How many quiet polls before an event stream for an idle job closes. The
+# browser reconnects on its own, and this keeps a book nobody is converting
+# from holding a connection open for the life of the server.
+IDLE_TICKS_BEFORE_CLOSE = 2
+
 
 class StartRequest(BaseModel):
     voice: str = "af_heart"
@@ -89,23 +94,33 @@ def create_app(data_dir: Path, on_event: Callable[[str], None] | None = None) ->
         if not data.startswith(b"PK"):
             raise HTTPException(400, "That does not look like an EPUB (not a zip archive).")
 
-        job_id = manager.create(data, file.filename)
+        # Read the book before creating anything, so a bad file leaves nothing
+        # behind and a good one can be named after its title rather than the
+        # long, punctuation-heavy filenames EPUBs arrive with.
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
         try:
-            details = _inspect(manager.job_dir(job_id) / "source.epub")
+            details = _inspect(tmp_path)
         except Exception as exc:
-            # A file that is a zip but not a readable EPUB got this far. Don't
-            # leave a job directory behind that can never be converted.
-            manager.delete(job_id)
             raise HTTPException(
                 400, f"That file could not be read as an EPUB: {exc}"
             ) from exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
         if not details["chapters"]:
-            manager.delete(job_id)
             raise HTTPException(
                 400,
                 "No readable chapters were found in that EPUB. It may be "
                 "image-only (a scanned book), or DRM-protected.",
             )
+
+        job_id = manager.create(
+            data, file.filename, title=details["title"], author=details["author"]
+        )
         return {"id": job_id} | details
 
     @app.get("/api/jobs/{job_id}/inspect")
@@ -164,12 +179,26 @@ def create_app(data_dir: Path, on_event: Callable[[str], None] | None = None) ->
     async def events(job_id: str):
         async def stream():
             last = None
+            misses = 0
+            idle_ticks = 0
             while True:
                 try:
                     summary = manager.summary(job_id, with_chapters=True)
-                except Exception:
-                    yield 'event: gone\ndata: {}\n\n'
+                    misses = 0
+                except FileNotFoundError:
+                    # The job was deleted while the browser was watching it.
+                    yield "event: gone\ndata: {}\n\n"
                     return
+                except Exception:
+                    # A transient read -- the database is being created, or is
+                    # briefly locked mid-write. Keep the stream open; giving up
+                    # here is what leaves the UI showing no progress at all.
+                    misses += 1
+                    if misses > 30:
+                        yield "event: gone\ndata: {}\n\n"
+                        return
+                    await asyncio.sleep(2)
+                    continue
                 payload = asdict(summary) | {"percent": summary.percent}
                 text = json.dumps(payload, default=str)
                 if text != last:  # only push when something actually changed
@@ -179,6 +208,15 @@ def create_app(data_dir: Path, on_event: Callable[[str], None] | None = None) ->
                     yield ": keepalive\n\n"
                 if summary.state in ("done", "failed"):
                     return
+                # Nothing is converting. Send the current state, then close
+                # rather than holding a connection open indefinitely -- the
+                # browser reconnects, and an idle job has nothing to stream.
+                if summary.state == "idle":
+                    idle_ticks += 1
+                    if idle_ticks >= IDLE_TICKS_BEFORE_CLOSE:
+                        return
+                else:
+                    idle_ticks = 0
                 await asyncio.sleep(2)
 
         return StreamingResponse(

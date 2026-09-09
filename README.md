@@ -344,6 +344,7 @@ Useful `convert` flags:
 | `--max-chunk-chars` | `380` | Lower is safer, slower, and adds more seams |
 | `--workers` | auto | Parallel synthesis processes; auto reads cores and free RAM |
 | `--audio-only` | off | Render chapter WAVs, skip the M4B mux |
+| `--keep-work` | off | Keep the intermediate WAVs after the M4B is built |
 | `--keep-front-matter` | off | Keep title page, TOC, copyright |
 
 ## Project layout
@@ -396,10 +397,13 @@ check the committed bundle matches its source.
     chapters.ffmeta       chapter markers handed to ffmpeg
 ```
 
-The `work/` directory is safe to delete once the `.m4b` exists — and worth
-deleting, since intermediate audio is uncompressed. Budget roughly **170 MB of
-WAV per hour** of finished audiobook while a conversion is in flight (a 12-hour
-novel peaks around 2 GB); the `.m4b` itself lands near 30 MB for the same book.
+`work/` is deleted automatically once the `.m4b` is built, so a finished job is
+the one file you wanted rather than a folder of scaffolding around it. Pass
+`--keep-work` to keep the intermediates, at the cost of roughly **170 MB of WAV
+per hour** of audiobook (a 12-hour novel peaks near 2 GB while converting).
+
+Cleanup only happens on a *successful* mux — if the M4B step fails, everything
+is kept so a re-run finishes in seconds rather than re-rendering.
 
 [kokoro]: https://huggingface.co/hexgrad/Kokoro-82M
 [espeak]: https://github.com/espeak-ng/espeak-ng/releases

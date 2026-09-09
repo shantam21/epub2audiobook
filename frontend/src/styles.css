@@ -172,3 +172,46 @@ button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad)
 }
 .spacer { flex: 1; }
 .empty { color: var(--muted); text-align: center; padding: 26px 0; }
+
+/* One clear action, everything else secondary */
+.action, .finished {
+  margin-top: 22px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  text-align: center;
+}
+.finished {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 20px; text-align: left;
+  border-color: var(--good);
+}
+.finished .hint { margin: 0; }
+button.big {
+  font-size: 16px;
+  padding: 14px 30px;
+  width: auto;
+}
+.action-note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+
+button.link {
+  background: none; border: none; color: var(--accent);
+  padding: 9px 6px; font-weight: 500;
+}
+button.link:hover { text-decoration: underline; border: none; }
+
+.advanced {
+  margin-top: 14px; padding: 16px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.advanced .hint { margin-bottom: 0; }
+
+.logbox { margin-top: 14px; }
+.logbox > summary {
+  cursor: pointer; color: var(--muted); font-size: 13px;
+  padding: 6px 0; user-select: none;
+}
+.logbox > summary:hover { color: var(--text); }
+.logbox .log { margin-top: 6px; }

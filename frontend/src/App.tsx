@@ -25,6 +25,7 @@ export default function App() {
   const [only, setOnly] = useState("");
   const [workers, setWorkers] = useState(0);
   const [llm, setLlm] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const unsubscribe = useRef<(() => void) | null>(null);
   // Which job's saved settings we have already loaded into the form, so a
@@ -227,9 +228,43 @@ export default function App() {
             </>
           )}
 
-          <div className="row" style={{ marginTop: 20 }}>
+          {job?.output ? (
+            <div className="finished">
+              <div>
+                <strong>Your audiobook is ready.</strong>
+                <p className="hint" style={{ marginTop: 4 }}>
+                  One <code>.m4b</code> file with chapter markers and cover art.
+                  Open the Books app and drag it in, or use File &rsaquo; Add to Library.
+                </p>
+              </div>
+              <a href={api.downloadUrl(job.id)} download>
+                <button className="primary big">Download for Apple Books</button>
+              </a>
+            </div>
+          ) : (
+            <div className="action">
+              {running ? (
+                <button className="danger big" onClick={stop}>
+                  Stop
+                </button>
+              ) : (
+                <button className="primary big" onClick={start}>
+                  {job && job.chunks_done > 0
+                    ? "Resume the whole book"
+                    : "Convert the whole book"}
+                </button>
+              )}
+              <div className="action-note">
+                {running
+                  ? "Converting every chapter into one file. You can close this page — it keeps going."
+                  : "Every chapter, start to finish, into a single .m4b for Apple Books."}
+              </div>
+            </div>
+          )}
+
+          <div className="row" style={{ marginTop: 18 }}>
             <div className="field">
-              <label htmlFor="voice">Voice</label>
+              <label htmlFor="voice">Narrator</label>
               <select
                 id="voice"
                 value={voice}
@@ -243,83 +278,77 @@ export default function App() {
                 ))}
               </select>
             </div>
-
-            <div className="field">
-              <label htmlFor="speed">Speed</label>
-              <input
-                id="speed"
-                type="number"
-                min={0.5}
-                max={2}
-                step={0.05}
-                value={speed}
-                onChange={(e) => setSpeed(Number(e.target.value))}
-                disabled={running}
-                style={{ minWidth: 90 }}
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="only">Chapters</label>
-              <input
-                id="only"
-                type="text"
-                placeholder="all — or 0-5,9"
-                value={only}
-                onChange={(e) => setOnly(e.target.value)}
-                disabled={running}
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="workers">Workers</label>
-              <input
-                id="workers"
-                type="number"
-                min={0}
-                max={8}
-                value={workers}
-                onChange={(e) => setWorkers(Number(e.target.value))}
-                disabled={running}
-                style={{ minWidth: 90 }}
-              />
-            </div>
-          </div>
-
-          <div className="row" style={{ marginTop: 16 }}>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={llm}
-                onChange={(e) => setLlm(e.target.checked)}
-                disabled={running}
-              />
-              Claude text pre-pass (needs ANTHROPIC_API_KEY)
-            </label>
-
             <span className="spacer" />
-
-            {running ? (
-              <button className="danger" onClick={stop}>Stop</button>
-            ) : (
-              <button className="primary" onClick={start}>
-                {job && job.chunks_done > 0 ? "Resume" : "Convert"}
-              </button>
-            )}
-
-            {job?.output && (
-              <a href={api.downloadUrl(job.id)} download>
-                <button className="primary">Download M4B</button>
-              </a>
-            )}
-
-            <button className="danger" onClick={remove} disabled={running}>Delete</button>
+            <button className="link" onClick={() => setShowAdvanced((v) => !v)}>
+              {showAdvanced ? "Hide options" : "More options"}
+            </button>
+            <button className="danger" onClick={remove} disabled={running}>
+              Delete
+            </button>
           </div>
 
-          <p className="hint">
-            Workers <code>0</code> picks a count from your CPU and free memory. Each worker
-            holds its own copy of the model, so more is not always faster.
-          </p>
+          {showAdvanced && (
+            <div className="advanced">
+              <div className="row">
+                <div className="field">
+                  <label htmlFor="speed">Speed</label>
+                  <input
+                    id="speed"
+                    type="number"
+                    min={0.5}
+                    max={2}
+                    step={0.05}
+                    value={speed}
+                    onChange={(e) => setSpeed(Number(e.target.value))}
+                    disabled={running}
+                    style={{ minWidth: 90 }}
+                  />
+                </div>
+
+                <div className="field">
+                  <label htmlFor="only">Chapters</label>
+                  <input
+                    id="only"
+                    type="text"
+                    placeholder="all — or 0-5,9"
+                    value={only}
+                    onChange={(e) => setOnly(e.target.value)}
+                    disabled={running}
+                  />
+                </div>
+
+                <div className="field">
+                  <label htmlFor="workers">Workers</label>
+                  <input
+                    id="workers"
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={workers}
+                    onChange={(e) => setWorkers(Number(e.target.value))}
+                    disabled={running}
+                    style={{ minWidth: 90 }}
+                  />
+                </div>
+              </div>
+
+              <label className="check" style={{ marginTop: 14 }}>
+                <input
+                  type="checkbox"
+                  checked={llm}
+                  onChange={(e) => setLlm(e.target.checked)}
+                  disabled={running}
+                />
+                Claude text pre-pass (needs ANTHROPIC_API_KEY)
+              </label>
+
+              <p className="hint">
+                Leave Chapters empty for the whole book. Workers <code>0</code> picks a
+                count from your CPU and free memory — each worker holds its own copy of
+                the model, so more is not always faster.
+              </p>
+            </div>
+          )}
 
           {job && job.chapter_rows.length > 0 && (
             <>
@@ -344,8 +373,19 @@ export default function App() {
             </>
           )}
 
-          {job?.error && <div className="error" style={{ marginTop: 16 }}>{job.error}</div>}
-          {job?.log && <pre className="log">{job.log}</pre>}
+          {job?.state === "failed" && (
+            <div className="error" style={{ marginTop: 16 }}>
+              This conversion stopped before finishing. The end of its log is
+              below — the last few lines usually say why. Fix the cause and press
+              Resume; everything already rendered is kept.
+            </div>
+          )}
+          {(job?.log || job?.error) && (
+            <details className="logbox" open={job?.state === "failed"}>
+              <summary>Conversion log</summary>
+              <pre className="log">{job.log || job.error}</pre>
+            </details>
+          )}
         </section>
       )}
     </div>

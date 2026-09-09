@@ -157,6 +157,9 @@ def convert(
     workers: int = typer.Option(
         0, help="Parallel synthesis processes. 0 picks a count from your CPU and free RAM."
     ),
+    keep_work: bool = typer.Option(
+        False, help="Keep the intermediate WAVs after the M4B is built."
+    ),
 ) -> None:
     """Convert an EPUB to an M4B audiobook. Re-run to resume where you stopped."""
     work = _work_dir(epub_path, out)
@@ -180,6 +183,7 @@ def convert(
         retry_failed=retry_failed,
         audio_only=audio_only,
         workers=workers,
+        keep_work=keep_work,
     )
 
 
@@ -190,6 +194,9 @@ def resume(
     audio_only: bool = typer.Option(False, help="Render audio but skip the final M4B mux."),
     workers: int = typer.Option(
         0, help="Parallel synthesis processes. 0 picks a count from your CPU and free RAM."
+    ),
+    keep_work: bool = typer.Option(
+        False, help="Keep the intermediate WAVs after the M4B is built."
     ),
 ) -> None:
     """Continue an interrupted conversion using its saved settings."""
@@ -232,6 +239,7 @@ def resume(
         retry_failed=retry_failed,
         audio_only=audio_only,
         workers=workers,
+        keep_work=keep_work,
         reuse_selection=True,
     )
 
@@ -523,6 +531,7 @@ def _run(
     retry_failed: bool,
     audio_only: bool,
     workers: int = 0,
+    keep_work: bool = False,
     reuse_selection: bool = False,
 ) -> None:
     from .tts import TTSError
@@ -618,7 +627,7 @@ def _run(
         if audio_only:
             console.print("[green]Audio rendered.[/green] Skipping the M4B mux as asked.")
             return
-        _mux(store, work, book, bitrate)
+        _mux(store, work, book, bitrate, keep_work=keep_work)
 
     except KeyboardInterrupt:
         console.print(
@@ -865,7 +874,7 @@ def _maybe_close_chapter(
     store.set_chapter_audio(chapter_idx, str(chapter_wav), duration)
 
 
-def _mux(store: JobStore, work: Path, book, bitrate: str) -> None:
+def _mux(store: JobStore, work: Path, book, bitrate: str, keep_work: bool = False) -> None:
     chapters = store.chapters(selected_only=True)
     ready = [c for c in chapters if c.status == DONE and c.audio_path]
     missing = [c for c in chapters if c.status != DONE]
@@ -905,18 +914,49 @@ def _mux(store: JobStore, work: Path, book, bitrate: str) -> None:
 
     total = sum(c.duration or 0.0 for c in ready)
     size_mb = out_file.stat().st_size / (1024 * 1024)
+
+    # The chunk and chapter WAVs exist only to build this file. They are
+    # roughly ten times its size, and keeping them turns a finished job into a
+    # folder of scaffolding around the one file you actually wanted.
+    freed = ""
+    if not keep_work:
+        scratch = work / "work"
+        megabytes = _dir_size_mb(scratch)
+        shutil.rmtree(scratch, ignore_errors=True)
+        if megabytes >= 1:
+            freed = f"\nCleared {megabytes:,.0f} MB of intermediate audio."
+
     console.print(
         Panel.fit(
             f"[green]{out_file.resolve()}[/green]\n"
-            f"{len(ready)} chapters   {textprep.format_duration(total)}   {size_mb:.1f} MB\n\n"
+            f"{len(ready)} chapters   {textprep.format_duration(total)}   {size_mb:.1f} MB"
+            f"{freed}\n\n"
             "Import into Apple Books: open the Books app and drag the .m4b in,\n"
             "or File > Add to Library. It lands under Audiobooks and syncs via iCloud.",
             title="Done",
         )
     )
+    if not keep_work:
+        console.print(
+            "[dim]Re-running with different settings will re-render from scratch; "
+            "pass --keep-work to keep the intermediates.[/dim]"
+        )
 
 
 # -- helpers ---------------------------------------------------------------
+
+
+def _dir_size_mb(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total / (1024 * 1024)
 
 
 def _progress() -> Progress:

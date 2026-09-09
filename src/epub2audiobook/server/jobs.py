@@ -15,6 +15,7 @@ the browser (and vice versa) with no extra bookkeeping.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import signal
 import sqlite3
@@ -28,6 +29,7 @@ from pathlib import Path
 
 DB_NAME = "job.db"
 UPLOAD_NAME = "source.epub"
+META_NAME = "job.json"
 
 # A job whose database was stamped this recently is treated as live even when
 # this process did not start it -- that is how a terminal-launched conversion
@@ -94,18 +96,25 @@ class JobManager:
     def list_jobs(self) -> list[JobSummary]:
         jobs = []
         for entry in sorted(self.data_dir.iterdir()):
-            if entry.is_dir() and (entry / DB_NAME).exists():
-                try:
-                    jobs.append(self.summary(entry.name))
-                except Exception:
-                    continue  # a half-created job should not break the list
+            if not entry.is_dir():
+                continue
+            # A job exists from the moment it is uploaded. job.db only appears
+            # once a conversion starts, so it cannot be what makes a job real.
+            if not (entry / DB_NAME).exists() and not (entry / META_NAME).exists():
+                continue
+            try:
+                jobs.append(self.summary(entry.name))
+            except Exception:
+                continue  # a half-created job should not break the list
         return sorted(jobs, key=lambda j: j.updated_at, reverse=True)
 
     def summary(self, job_id: str, with_chapters: bool = False) -> JobSummary:
         path = self.job_dir(job_id)
         db = path / DB_NAME
         if not db.exists():
-            raise FileNotFoundError(job_id)
+            # Uploaded but never converted: report what we know from the
+            # metadata written at upload time, rather than 404.
+            return self._pending_summary(job_id, path)
 
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         con.row_factory = sqlite3.Row
@@ -154,6 +163,30 @@ class JobManager:
             chapter_rows=rows,
         )
 
+    def _pending_summary(self, job_id: str, path: Path) -> JobSummary:
+        """A job that has been uploaded but not yet converted."""
+        if not path.is_dir():
+            raise FileNotFoundError(job_id)
+        meta = {}
+        try:
+            meta = json.loads((path / META_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+        with self._lock:
+            proc = self._procs.get(job_id)
+        # A conversion can be running while it is still preparing text, before
+        # it has written the database.
+        state = "running" if proc and proc.popen.poll() is None else "idle"
+
+        return JobSummary(
+            id=job_id,
+            title=meta.get("title") or job_id,
+            author=meta.get("author") or "",
+            state=state,
+            updated_at=meta.get("created_at", 0.0),
+        )
+
     def _state(self, job_id: str, stats, output, updated_at: float) -> tuple[str, str | None]:
         with self._lock:
             proc = self._procs.get(job_id)
@@ -176,11 +209,34 @@ class JobManager:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def create(self, epub_bytes: bytes, filename: str) -> str:
-        job_id = _unique_dir_name(self.data_dir, Path(filename).stem)
+    def create(
+        self,
+        epub_bytes: bytes,
+        filename: str,
+        title: str = "",
+        author: str = "",
+    ) -> str:
+        """Create a job. Named after the book, falling back to the filename.
+
+        EPUB filenames from the wild are long and full of punctuation -- the
+        book's own title makes a far better directory name and job id.
+        """
+        job_id = _unique_dir_name(self.data_dir, title or Path(filename).stem)
         path = self.data_dir / job_id
         path.mkdir(parents=True)
         (path / UPLOAD_NAME).write_bytes(epub_bytes)
+        (path / META_NAME).write_text(
+            json.dumps(
+                {
+                    "title": title,
+                    "author": author,
+                    "filename": filename,
+                    "created_at": time.time(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         return job_id
 
     def start(
@@ -336,12 +392,30 @@ def _unique_dir_name(root: Path, stem: str) -> str:
     return candidate
 
 
+# The CLI writes rich-formatted output: box drawing, ANSI colour, and progress
+# bars redrawn with carriage returns. Rendered in a browser that is a wall of
+# line-art, so strip it back to the words before showing it.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_BOX_CHARS = (
+    "─━│┃┌┏┐┓└┗┘┛"
+    "═║╔╗╚╝╴╵╶╷"
+    "█░▒▓▰▱"
+)
+
+
+def _readable(line: str) -> str:
+    """One log line, without the terminal decoration."""
+    line = _ANSI_RE.sub("", line.split("\r")[-1])
+    return line.strip(_BOX_CHARS + " ")
+
+
 def _tail(path: Path, lines: int = 40) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    return "\n".join(text.splitlines()[-lines:])
+    cleaned = (_readable(line) for line in text.splitlines()[-lines:])
+    return "\n".join(line for line in cleaned if line)
 
 
 def _terminate_tree(popen: subprocess.Popen) -> None:

@@ -158,3 +158,21 @@ class TestFFMetadata:
         chapters = [assemble.ChapterAudio("Cost = $5; see #3", None, 1.0)]
         meta = assemble._ffmetadata(chapters, "T", "A", "", "")
         assert r"title=Cost \= $5\; see \#3" in meta
+
+
+class TestWorkCleanup:
+    """A finished job should be the one .m4b, not a folder of scaffolding
+    around it: the intermediates are roughly ten times the output's size."""
+
+    def test_measures_a_directory(self, tmp_path):
+        from epub2audiobook.cli import _dir_size_mb
+
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+        (tmp_path / "b.bin").write_bytes(b"x" * (1024 * 1024))
+        assert _dir_size_mb(tmp_path) == pytest.approx(3.0, abs=0.05)
+
+    def test_a_missing_directory_is_zero(self, tmp_path):
+        from epub2audiobook.cli import _dir_size_mb
+
+        assert _dir_size_mb(tmp_path / "nope") == 0.0

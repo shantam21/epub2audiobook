@@ -19,6 +19,35 @@ def client(tmp_path):
     return TestClient(create_app(tmp_path)), tmp_path
 
 
+@pytest.fixture
+def tiny_epub():
+    """A real, minimal EPUB, so upload paths exercise the actual parser."""
+    from ebooklib import epub
+
+    book = epub.EpubBook()
+    book.set_identifier("tiny-1")
+    book.set_title("A Tiny Book")
+    book.set_language("en")
+    book.add_author("A Writer")
+
+    ch = epub.EpubHtml(title="Chapter One", file_name="c1.xhtml", lang="en")
+    ch.content = "<html><body><h1>Chapter One</h1><p>" + ("Words here. " * 80) + "</p></body></html>"
+    book.add_item(ch)
+    book.toc = (epub.Link("c1.xhtml", "Chapter One", "c1"),)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", ch]
+
+    import tempfile, pathlib as _p
+
+    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
+        tmp = _p.Path(f.name)
+    epub.write_epub(str(tmp), book)
+    data = tmp.read_bytes()
+    tmp.unlink(missing_ok=True)
+    return data
+
+
 def seed_job(root, name="A Book", chunks_done=1):
     """Create a job directory that looks like a partly-finished conversion."""
     path = root / name
@@ -295,18 +324,22 @@ class TestFailureReporting:
         def sleeper(cmd, **kwargs):
             return real_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
 
+        # Restore Popen the moment the process exists: _terminate_tree runs
+        # taskkill through subprocess.run, which builds a Popen internally --
+        # leaving the patch in place intercepts the kill itself.
         subprocess.Popen = sleeper
         try:
             manager.start("Book", voice="af_heart", speed=1.0, only=None,
                           workers=1, llm=False, keep_front_matter=False)
-            time.sleep(0.5)
-            manager.stop("Book")
-            for _ in range(100):
-                if any("stopped" in m for m in seen):
-                    break
-                time.sleep(0.05)
         finally:
             subprocess.Popen = real_popen
+
+        time.sleep(0.3)
+        manager.stop("Book")
+        for _ in range(100):
+            if any("stopped" in m for m in seen):
+                break
+            time.sleep(0.05)
 
         assert any("stopped by request" in m for m in seen), seen
         assert not any("FAILED" in m for m in seen), seen
@@ -329,3 +362,95 @@ class TestBadEpubUpload:
         c.post("/api/jobs", files={"file": ("book.epub", bad, "application/epub+zip")})
         assert c.get("/api/jobs").json()["jobs"] == []
         assert not (root / "book").exists()
+
+
+class TestUploadedButNotStarted:
+    """job.db only appears when a conversion starts. Before that the job still
+    exists, and 404-ing it left the UI unable to show or track a new book."""
+
+    def _upload(self, client, epub_bytes):
+        return client.post(
+            "/api/jobs",
+            files={"file": ("whatever-long-name.epub", epub_bytes, "application/epub+zip")},
+        )
+
+    def test_a_fresh_upload_can_be_fetched(self, client, tiny_epub):
+        c, _ = client
+        job_id = self._upload(c, tiny_epub).json()["id"]
+        r = c.get(f"/api/jobs/{job_id}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "idle"
+        assert body["chunks"] == 0
+
+    def test_a_fresh_upload_appears_in_the_list(self, client, tiny_epub):
+        c, _ = client
+        self._upload(c, tiny_epub)
+        assert len(c.get("/api/jobs").json()["jobs"]) == 1
+
+    def test_the_job_is_named_after_the_book_not_the_file(self, client, tiny_epub):
+        c, _ = client
+        job_id = self._upload(c, tiny_epub).json()["id"]
+        assert job_id == "A Tiny Book"
+        assert "whatever-long-name" not in job_id
+
+    def test_metadata_survives_without_a_database(self, client, tiny_epub):
+        c, _ = client
+        job_id = self._upload(c, tiny_epub).json()["id"]
+        body = c.get(f"/api/jobs/{job_id}").json()
+        assert body["title"] == "A Tiny Book"
+        assert body["author"] == "A Writer"
+
+    def test_events_stream_does_not_immediately_give_up(self, client, tiny_epub):
+        """The stream used to emit `gone` the moment job.db was missing, which
+        is exactly the state a just-uploaded book is in."""
+        c, _ = client
+        job_id = self._upload(c, tiny_epub).json()["id"]
+        with c.stream("GET", f"/api/jobs/{job_id}/events") as r:
+            assert r.status_code == 200
+            for line in r.iter_lines():
+                if line.startswith("event: gone"):
+                    pytest.fail("stream gave up on a job that exists")
+                if line.startswith("data: "):
+                    assert json.loads(line[6:])["id"] == job_id
+                    break
+
+    def test_a_deleted_job_ends_the_stream(self, client, tiny_epub):
+        c, root = client
+        job_id = self._upload(c, tiny_epub).json()["id"]
+        c.delete(f"/api/jobs/{job_id}")
+        assert c.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+class TestLogReadability:
+    """The CLI's output is rich-formatted; the browser needs the words, not
+    the box drawing."""
+
+    def test_strips_box_drawing(self):
+        from epub2audiobook.server.jobs import _readable
+
+        assert _readable("│ Voice af_heart at 1.0x │") == "Voice af_heart at 1.0x"
+        assert _readable("┌──── epub2audiobook ────┐") == "epub2audiobook"
+
+    def test_keeps_the_last_progress_redraw_only(self):
+        from epub2audiobook.server.jobs import _readable
+
+        assert _readable("old\rnew text") == "new text"
+
+    def test_strips_ansi_colour(self):
+        from epub2audiobook.server.jobs import _readable
+
+        assert _readable("\x1b[31mfailed\x1b[0m") == "failed"
+
+    def test_leaves_ordinary_lines_alone(self):
+        from epub2audiobook.server.jobs import _readable
+
+        line = "ffmpeg was not found on PATH."
+        assert _readable(line) == line
+
+    def test_tail_drops_lines_that_were_only_decoration(self, tmp_path):
+        from epub2audiobook.server.jobs import _tail
+
+        log = tmp_path / "convert.log"
+        log.write_text("└────────┘\nreal error here\n│      │\n", encoding="utf-8")
+        assert _tail(log) == "real error here"
