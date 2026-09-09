@@ -734,16 +734,30 @@ def _render(
                 )
             )
 
-    if workers <= 0:
-        workers = rnd.default_workers()
+    # Say where the work will actually happen. A CPU-only PyTorch on a machine
+    # with an NVIDIA card runs perfectly, just many times slower, and gives no
+    # indication why -- so name the device rather than leave it to be guessed.
+    device, device_name, device_warning = rnd.detect_device()
+
+    explicit_workers = workers > 0
+    if not explicit_workers:
+        workers = rnd.default_workers(device)
     workers = max(1, min(workers, len(jobs) or 1))
     threads = rnd.threads_per_worker(workers)
 
     console.print(
-        f"Rendering {len(jobs)} of {total} chunks "
-        f"with [cyan]{workers}[/cyan] worker{'s' if workers > 1 else ''} "
+        f"Rendering {len(jobs)} of {total} chunks on [cyan]{device_name}[/cyan] "
+        f"with {workers} worker{'s' if workers > 1 else ''} "
         f"x {threads} thread{'s' if threads > 1 else ''}."
     )
+    if device_warning:
+        console.print(f"[yellow]{device_warning}[/yellow]")
+    if device == "cuda" and workers > 1:
+        console.print(
+            "[yellow]More than one worker on a GPU is usually slower, not "
+            "faster: they queue for the same device and each loads its own "
+            "copy of the model into VRAM.[/yellow]"
+        )
 
     # Free memory can fall a long way during a multi-hour render as other
     # applications grow. When it does, Windows trims the workers' resident sets

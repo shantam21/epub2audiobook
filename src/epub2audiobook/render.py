@@ -13,6 +13,7 @@ unchanged: a chunk is marked done only after its .wav is fully on disk.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,8 +64,47 @@ class ChunkResult:
     error: str | None = None
 
 
-def default_workers() -> int:
+def detect_device() -> tuple[str, str, str | None]:
+    """Return (device, description, warning).
+
+    Kokoro selects CUDA on its own when torch reports it available, so this
+    only reports what will happen -- except for one case worth shouting about:
+    a machine with an NVIDIA card whose PyTorch has no CUDA support at all.
+    That runs perfectly on CPU at a fraction of the speed, with nothing to
+    suggest why, and it is the default outcome of `pip install torch` on
+    Windows.
+    """
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - torch is a hard dependency
+        return "cpu", "CPU", f"could not query PyTorch: {exc}"
+
+    if torch.cuda.is_available():
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "unknown GPU"
+        return "cuda", f"CUDA ({name})", None
+
+    if torch.version.cuda is None and shutil.which("nvidia-smi"):
+        return "cpu", "CPU", (
+            "This machine has an NVIDIA driver, but the installed PyTorch is a "
+            "CPU-only build, so the GPU will not be used.\n"
+            "On Windows, PyPI only publishes CPU wheels. To get the CUDA build:\n"
+            "  uv pip install torch --torch-backend=auto\n"
+            "or see https://pytorch.org/get-started/locally/"
+        )
+    return "cpu", "CPU", None
+
+
+def default_workers(device: str = "cpu") -> int:
     """A worker count that speeds things up without thrashing the machine."""
+    # On a GPU the pool is the wrong tool: one worker already saturates the
+    # device, and each extra one loads another copy of the model into VRAM
+    # while they queue for the same hardware.
+    if device == "cuda":
+        return 1
+
     logical = os.cpu_count() or 2
     # Two logical cores per worker, so each still gets real intra-op threading.
     by_cpu = max(1, logical // 4)

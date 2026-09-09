@@ -179,6 +179,37 @@ one `.m4b` with chapter markers, cover art from the EPUB, and
 `media_type=2` — the tag that makes Apple Books shelve it as an audiobook
 rather than music.
 
+## GPU support
+
+Kokoro uses an NVIDIA GPU automatically when PyTorch reports one, and the tool
+prints which device it picked before it starts:
+
+```
+Rendering 941 of 941 chunks on CUDA (NVIDIA GeForce RTX 4090) with 1 worker x 6 threads
+```
+
+Whether you get that depends on the PyTorch wheel your platform installs:
+
+| Platform | PyPI PyTorch wheel | GPU used? |
+|---|---|---|
+| Linux | ships CUDA | **yes, automatically** |
+| Windows | CPU-only | **no** — needs the CUDA wheel, see below |
+| macOS | CPU / MPS | not applicable |
+
+**On Windows this is a silent trap.** PyPI publishes only CPU wheels for
+Windows, so a machine with a fast GPU renders at CPU speed with nothing to
+indicate why. The tool detects that case specifically — an NVIDIA driver
+present alongside a CPU-only PyTorch — and tells you, rather than leaving you
+to wonder. To fix it:
+
+```bash
+uv pip install torch --torch-backend=auto
+```
+
+On a GPU the worker pool is counterproductive, so `--workers 0` picks **one**
+worker: extra workers queue for the same device and each loads its own copy of
+the model into VRAM. The parallelism below is a CPU story.
+
 ## Speed and parallelism
 
 Kokoro on CPU does not saturate a modern machine by itself — torch's internal

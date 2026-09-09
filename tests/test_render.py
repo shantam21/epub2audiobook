@@ -142,3 +142,84 @@ class TestNoWorkerRecycling:
         from epub2audiobook import render
 
         assert not hasattr(render, "MAX_TASKS_PER_WORKER")
+
+
+class TestDeviceDetection:
+    """Kokoro picks CUDA on its own when torch reports it. These cover what we
+    report about that -- especially the silent case: an NVIDIA machine running
+    a CPU-only PyTorch, which is what `pip install torch` gives you on Windows.
+    """
+
+    def _fake_torch(self, monkeypatch, *, available, built_cuda, name="RTX 4090"):
+        import sys
+        import types
+
+        mod = types.ModuleType("torch")
+        mod.cuda = types.SimpleNamespace(
+            is_available=lambda: available,
+            get_device_name=lambda i: name,
+        )
+        mod.version = types.SimpleNamespace(cuda=built_cuda)
+        monkeypatch.setitem(sys.modules, "torch", mod)
+
+    def test_reports_the_gpu_when_cuda_is_available(self, monkeypatch):
+        self._fake_torch(monkeypatch, available=True, built_cuda="12.1")
+        device, desc, warning = render.detect_device()
+        assert device == "cuda"
+        assert "RTX 4090" in desc
+        assert warning is None
+
+    def test_warns_when_an_nvidia_box_has_a_cpu_only_torch(self, monkeypatch):
+        self._fake_torch(monkeypatch, available=False, built_cuda=None)
+        monkeypatch.setattr(render.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+        device, _, warning = render.detect_device()
+        assert device == "cpu"
+        assert warning is not None
+        assert "CPU-only" in warning
+        assert "torch-backend" in warning
+
+    def test_stays_quiet_on_a_machine_with_no_gpu(self, monkeypatch):
+        self._fake_torch(monkeypatch, available=False, built_cuda=None)
+        monkeypatch.setattr(render.shutil, "which", lambda name: None)
+        device, desc, warning = render.detect_device()
+        assert (device, desc, warning) == ("cpu", "CPU", None)
+
+    def test_no_warning_when_cuda_is_built_but_no_card_is_present(self, monkeypatch):
+        """A CUDA build with no device is a normal laptop situation, not a
+        misconfiguration worth shouting about."""
+        self._fake_torch(monkeypatch, available=False, built_cuda="12.1")
+        monkeypatch.setattr(render.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+        assert render.detect_device()[2] is None
+
+    def test_survives_torch_failing_to_import(self, monkeypatch):
+        import builtins
+
+        real = builtins.__import__
+
+        def boom(name, *a, **k):
+            if name == "torch":
+                raise ImportError("no torch")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", boom)
+        device, _, warning = render.detect_device()
+        assert device == "cpu" and "could not query" in warning
+
+
+class TestGpuWorkerSizing:
+    def test_one_worker_on_cuda(self, monkeypatch):
+        """Extra workers on a GPU queue for the same device and each load
+        another copy of the model into VRAM."""
+        monkeypatch.setattr(render.os, "cpu_count", lambda: 32)
+        monkeypatch.setattr(render, "memory_budget_gb", lambda: 128.0)
+        assert render.default_workers("cuda") == 1
+
+    def test_cpu_sizing_is_unchanged(self, monkeypatch):
+        monkeypatch.setattr(render.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(render, "memory_budget_gb", lambda: 32.0)
+        assert render.default_workers("cpu") == 3
+
+    def test_defaults_to_cpu_when_not_told(self, monkeypatch):
+        monkeypatch.setattr(render.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(render, "memory_budget_gb", lambda: 32.0)
+        assert render.default_workers() == render.default_workers("cpu")
