@@ -215,3 +215,17 @@ button.link:hover { text-decoration: underline; border: none; }
 }
 .logbox > summary:hover { color: var(--text); }
 .logbox .log { margin-top: 6px; }
+
+.chapters-head { display: flex; align-items: center; gap: 8px; margin-top: 24px; }
+.chosen-count {
+  margin-left: 10px; font-size: 12px; font-weight: 400;
+  text-transform: none; letter-spacing: 0; color: var(--muted);
+}
+.chapter { cursor: pointer; }
+.chapter:hover { background: var(--panel-2); }
+.chapter input[type="checkbox"] { cursor: pointer; margin: 0; }
+.chapter input[type="checkbox"]:disabled { cursor: default; }
+.chapter .idx {
+  display: inline-block; min-width: 26px; margin-right: 8px;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}

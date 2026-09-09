@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Inspection, Job, Meta } from "./api";
 import { api, formatDuration } from "./api";
+import type { ChapterItem } from "./components";
 import {
   ChapterList,
   DropZone,
@@ -9,6 +10,7 @@ import {
   ProgressBar,
   Stat,
   StateBadge,
+  toRangeString,
 } from "./components";
 
 export default function App() {
@@ -22,7 +24,7 @@ export default function App() {
 
   const [voice, setVoice] = useState("af_heart");
   const [speed, setSpeed] = useState(1);
-  const [only, setOnly] = useState("");
+  const [chosen, setChosen] = useState<Set<number>>(new Set());
   const [workers, setWorkers] = useState(0);
   const [llm, setLlm] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -31,6 +33,7 @@ export default function App() {
   // Which job's saved settings we have already loaded into the form, so a
   // live progress update never clobbers what the user is currently typing.
   const syncedFrom = useRef<string | null>(null);
+  const chosenFor = useRef<string | null>(null);
 
   const refreshJobs = useCallback(async () => {
     try {
@@ -58,6 +61,24 @@ export default function App() {
       syncedFrom.current = job.id;
     }
   }, [job]);
+
+  // Default to every chapter, and adopt a job's saved selection when it has one.
+  useEffect(() => {
+    const source: { idx: number; selected?: boolean }[] =
+      job && job.chapter_rows.length ? job.chapter_rows : (inspection?.chapters ?? []);
+    if (!source.length) return;
+    const key = `${selected}:${source.length}`;
+    if (chosenFor.current === key) return;
+    chosenFor.current = key;
+    const anyFlagged = source.some((c) => c.selected !== undefined);
+    setChosen(
+      new Set(
+        anyFlagged
+          ? source.filter((c) => c.selected !== false).map((c) => c.idx)
+          : source.map((c) => c.idx),
+      ),
+    );
+  }, [job, inspection, selected]);
 
   // Live progress for whichever job is open.
   useEffect(() => {
@@ -112,6 +133,24 @@ export default function App() {
     [refreshJobs],
   );
 
+  // One chapter list, whether it comes from the job or from a fresh upload.
+  const rows: ChapterItem[] =
+    job && job.chapter_rows.length
+      ? job.chapter_rows
+      : (inspection?.chapters ?? []);
+  const allIdx = rows.map((c) => c.idx);
+  const running = job?.state === "running";
+  const allChosen = allIdx.length > 0 && allIdx.every((i) => chosen.has(i));
+
+  const toggle = useCallback((idx: number) => {
+    setChosen((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }, []);
+
   const start = useCallback(async () => {
     if (!selected) return;
     setError(null);
@@ -119,7 +158,7 @@ export default function App() {
       await api.start(selected, {
         voice,
         speed,
-        only: only.trim() || null,
+        only: toRangeString(chosen, allIdx),
         workers,
         llm,
         keep_front_matter: false,
@@ -131,7 +170,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selected, voice, speed, only, workers, llm]);
+  }, [selected, voice, speed, chosen, allIdx, workers, llm]);
 
   const stop = useCallback(async () => {
     if (!selected) return;
@@ -155,8 +194,6 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [selected, refreshJobs]);
-
-  const running = job?.state === "running";
 
   return (
     <div className="app">
@@ -248,16 +285,25 @@ export default function App() {
                   Stop
                 </button>
               ) : (
-                <button className="primary big" onClick={start}>
-                  {job && job.chunks_done > 0
-                    ? "Resume the whole book"
-                    : "Convert the whole book"}
+                <button
+                  className="primary big"
+                  onClick={start}
+                  disabled={chosen.size === 0}
+                >
+                  {job && job.chunks_done > 0 ? "Resume" : "Convert"}
+                  {allChosen
+                    ? " the whole book"
+                    : ` ${chosen.size} chapter${chosen.size === 1 ? "" : "s"}`}
                 </button>
               )}
               <div className="action-note">
                 {running
-                  ? "Converting every chapter into one file. You can close this page — it keeps going."
-                  : "Every chapter, start to finish, into a single .m4b for Apple Books."}
+                  ? "You can close this page — it keeps going."
+                  : chosen.size === 0
+                    ? "Pick at least one chapter below."
+                    : allChosen
+                      ? "Every chapter, start to finish, into a single .m4b for Apple Books."
+                      : `${chosen.size} of ${allIdx.length} chapters into a single .m4b. Untick chapters below to change this.`}
               </div>
             </div>
           )}
@@ -306,18 +352,6 @@ export default function App() {
                 </div>
 
                 <div className="field">
-                  <label htmlFor="only">Chapters</label>
-                  <input
-                    id="only"
-                    type="text"
-                    placeholder="all — or 0-5,9"
-                    value={only}
-                    onChange={(e) => setOnly(e.target.value)}
-                    disabled={running}
-                  />
-                </div>
-
-                <div className="field">
                   <label htmlFor="workers">Workers</label>
                   <input
                     id="workers"
@@ -343,33 +377,45 @@ export default function App() {
               </label>
 
               <p className="hint">
-                Leave Chapters empty for the whole book. Workers <code>0</code> picks a
-                count from your CPU and free memory — each worker holds its own copy of
-                the model, so more is not always faster.
+                Workers <code>0</code> picks a count from your CPU and free memory —
+                each worker holds its own copy of the model, so more is not always
+                faster.
               </p>
             </div>
           )}
 
-          {job && job.chapter_rows.length > 0 && (
-            <>
-              <h2 style={{ marginTop: 24 }}>Chapters</h2>
-              <ChapterList rows={job.chapter_rows} />
-            </>
-          )}
 
-          {inspection && !job?.chapter_rows.length && (
+          {rows.length > 0 && (
             <>
-              <h2 style={{ marginTop: 24 }}>Chapters</h2>
-              <div className="chapters">
-                {inspection.chapters.map((c) => (
-                  <div key={c.idx} className="chapter">
-                    <span className="idx">{c.idx}</span>
-                    <span className="title" title={c.title}>{c.title}</span>
-                    <span className="count">{c.chars.toLocaleString()} chars</span>
-                    <span className="count">{formatDuration(c.estimated_seconds)}</span>
-                  </div>
-                ))}
+              <div className="chapters-head">
+                <h2 style={{ margin: 0 }}>
+                  Chapters
+                  <span className="chosen-count">
+                    {allChosen ? "all selected" : `${chosen.size} of ${allIdx.length} selected`}
+                  </span>
+                </h2>
+                <span className="spacer" />
+                <button
+                  className="link"
+                  disabled={running || allChosen}
+                  onClick={() => setChosen(new Set(allIdx))}
+                >
+                  Select all
+                </button>
+                <button
+                  className="link"
+                  disabled={running || chosen.size === 0}
+                  onClick={() => setChosen(new Set())}
+                >
+                  Clear
+                </button>
               </div>
+              <ChapterList
+                rows={rows}
+                chosen={chosen}
+                onToggle={toggle}
+                disabled={running}
+              />
             </>
           )}
 

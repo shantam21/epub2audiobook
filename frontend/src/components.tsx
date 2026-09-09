@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { ChapterRow, Job } from "./api";
+import type { Job } from "./api";
 import { formatDuration, formatNumber } from "./api";
 
 export function ProgressBar({
@@ -118,33 +118,92 @@ export function JobRow({
   );
 }
 
-export function ChapterList({ rows }: { rows: ChapterRow[] }) {
-  if (!rows.length) return <div className="empty">No chapters planned yet.</div>;
+/** One row of the chapter picker, normalised from either source. */
+export interface ChapterItem {
+  idx: number;
+  title: string;
+  /** Progress fields, present once a conversion has planned the chapter. */
+  chunks?: number;
+  chunks_done?: number;
+  status?: string;
+  duration?: number | null;
+  /** Estimate, shown before anything has been rendered. */
+  estimated_seconds?: number;
+}
+
+export function ChapterList({
+  rows,
+  chosen,
+  onToggle,
+  disabled,
+}: {
+  rows: ChapterItem[];
+  chosen: Set<number>;
+  onToggle: (idx: number) => void;
+  disabled: boolean;
+}) {
+  if (!rows.length) return <div className="empty">No chapters found.</div>;
   return (
     <div className="chapters">
       {rows.map((c) => {
-        const pct = c.chunks ? (100 * c.chunks_done) / c.chunks : 0;
+        const on = chosen.has(c.idx);
+        const planned = (c.chunks ?? 0) > 0;
+        const pct = planned ? (100 * (c.chunks_done ?? 0)) / (c.chunks as number) : 0;
         return (
-          <div key={c.idx} className={`chapter ${c.selected ? "" : "off"}`}>
-            <span className="idx">{c.idx}</span>
-            <span className="title" title={c.title}>{c.title}</span>
-            {c.selected ? (
+          <label key={c.idx} className={`chapter ${on ? "" : "off"}`}>
+            <input
+              type="checkbox"
+              checked={on}
+              disabled={disabled}
+              onChange={() => onToggle(c.idx)}
+              aria-label={`Include ${c.title}`}
+            />
+            <span className="title" title={c.title}>
+              <span className="idx">{c.idx}</span>
+              {c.title}
+            </span>
+            {on && planned ? (
               <ProgressBar percent={pct} state={c.status === "done" ? "done" : ""} slim />
             ) : (
-              <span className="count">skipped</span>
+              <span className="count">{on ? "" : "skipped"}</span>
             )}
             <span className="count">
               {c.status === "done" && c.duration
                 ? formatDuration(c.duration)
-                : c.selected
+                : planned && on
                   ? `${c.chunks_done}/${c.chunks}`
-                  : ""}
+                  : c.estimated_seconds
+                    ? formatDuration(c.estimated_seconds)
+                    : ""}
             </span>
-          </div>
+          </label>
         );
       })}
     </div>
   );
+}
+
+/** Turn a set of chapter indices into the CLI's --only syntax: "0-5,9". */
+export function toRangeString(chosen: Set<number>, all: number[]): string | null {
+  if (all.every((i) => chosen.has(i))) return null; // null means "everything"
+  const sorted = [...chosen].sort((a, b) => a - b);
+  const parts: string[] = [];
+  let start: number | null = null;
+  let prev: number | null = null;
+  for (const n of sorted) {
+    if (start === null) {
+      start = prev = n;
+      continue;
+    }
+    if (prev !== null && n === prev + 1) {
+      prev = n;
+      continue;
+    }
+    parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+    start = prev = n;
+  }
+  if (start !== null) parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return parts.join(",");
 }
 
 export function InspectSummary({
