@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -211,9 +212,11 @@ def resume(
     llm_model = job["llm_model"]
     store.close()
 
-    if not epub_path.exists():
-        console.print(f"[red]The source EPUB has moved: {epub_path}[/red]")
-        raise typer.Exit(1)
+    # Prefer the copy kept inside the job: the original may have been moved or
+    # deleted during the hours a conversion takes. _run falls back to the saved
+    # chapters if neither exists.
+    if not epub_path.exists() and (work / SOURCE_COPY).exists():
+        epub_path = work / SOURCE_COPY
 
     _run(
         epub_path=epub_path,
@@ -490,40 +493,53 @@ def _run(
     store = JobStore(work / DB_NAME)
 
     try:
-        # 1. Parse the EPUB and reconcile it against any saved job.
-        with console.status("Reading EPUB..."):
-            book = epubsrc.load(
-                epub_path, min_chars=min_chars, skip_front_matter=not keep_front_matter
-            )
-        if not book.chapters:
-            console.print("[red]No readable chapters found. Try --keep-front-matter.[/red]")
-            raise typer.Exit(1)
+        # 1. Parse the EPUB and reconcile it against any saved job. A job that
+        #    already has its chapters can carry on without the source file --
+        #    the database holds every chapter's text.
+        if epub_path.exists():
+            with console.status("Reading EPUB..."):
+                book = epubsrc.load(
+                    epub_path, min_chars=min_chars, skip_front_matter=not keep_front_matter
+                )
+            if not book.chapters:
+                console.print("[red]No readable chapters found. Try --keep-front-matter.[/red]")
+                raise typer.Exit(1)
 
-        digest = file_hash(epub_path)
-        job = store.job()
-        if job and job["epub_hash"] != digest:
+            # Keep a copy inside the job so a moved or deleted original can
+            # never strand a half-finished audiobook again.
+            _archive_source(epub_path, work)
+
+            digest = file_hash(epub_path)
+            job = store.job()
+            if job and job["epub_hash"] != digest:
+                console.print(
+                    "[yellow]The EPUB changed since this job started; "
+                    "affected chapters will be re-rendered.[/yellow]"
+                )
+
+            store.init_job(
+                epub_path=epub_path.resolve(),
+                epub_hash=digest,
+                title=book.title,
+                author=book.author,
+                settings=settings.to_dict(),
+                options={
+                    "min_chars": min_chars,
+                    "keep_front_matter": keep_front_matter,
+                    "bitrate": bitrate,
+                    "llm_effort": llm_effort,
+                },
+                llm_model=llm_model if llm else None,
+            )
+            store.replace_chapters(
+                [(c.idx, c.title, c.href, c.text) for c in book.chapters]
+            )
+        else:
+            book = _book_from_store(store, work, epub_path)
             console.print(
-                "[yellow]The EPUB changed since this job started; "
-                "affected chapters will be re-rendered.[/yellow]"
+                f"[yellow]The source EPUB is gone from {epub_path}.[/yellow]\n"
+                "[yellow]Continuing from the chapters saved in this job.[/yellow]"
             )
-
-        store.init_job(
-            epub_path=epub_path.resolve(),
-            epub_hash=digest,
-            title=book.title,
-            author=book.author,
-            settings=settings.to_dict(),
-            options={
-                "min_chars": min_chars,
-                "keep_front_matter": keep_front_matter,
-                "bitrate": bitrate,
-                "llm_effort": llm_effort,
-            },
-            llm_model=llm_model if llm else None,
-        )
-        store.replace_chapters(
-            [(c.idx, c.title, c.href, c.text) for c in book.chapters]
-        )
         if not reuse_selection:
             store.set_selection(_parse_range(only) if only else None)
         if retry_failed:
@@ -823,6 +839,12 @@ def _mux(store: JobStore, work: Path, book, bitrate: str) -> None:
         )
         raise typer.Exit(1)
 
+    # A cover.jpg / cover.png dropped into the job directory wins, so you can
+    # replace poor EPUB artwork -- or supply one when the EPUB is gone.
+    cover, cover_type = _cover_from_disk(work)
+    if cover is None:
+        cover, cover_type = book.cover, book.cover_media_type
+
     out_file = work / f"{_safe_name(book.title)}.m4b"
     with console.status("Encoding M4B..."):
         assemble.build_m4b(
@@ -835,8 +857,8 @@ def _mux(store: JobStore, work: Path, book, bitrate: str) -> None:
             title=book.title,
             author=book.author,
             description=book.description,
-            cover=book.cover,
-            cover_media_type=book.cover_media_type,
+            cover=cover,
+            cover_media_type=cover_type,
             bitrate=bitrate,
             notify=lambda msg: console.print(f"[yellow]{msg}[/yellow]"),
         )
@@ -867,6 +889,65 @@ def _progress() -> Progress:
         TimeRemainingColumn(),
         console=console,
     )
+
+
+SOURCE_COPY = "source.epub"
+
+
+def _archive_source(epub_path: Path, work: Path) -> None:
+    """Keep the EPUB inside the job directory.
+
+    A conversion runs for hours; the original can be moved, renamed or deleted
+    long before it finishes. Without a copy, a resume has no way to rebuild the
+    chapter list and the part-finished audiobook is stranded.
+    """
+    target = work / SOURCE_COPY
+    try:
+        if not target.exists() or target.stat().st_size != epub_path.stat().st_size:
+            shutil.copy2(epub_path, target)
+    except OSError:
+        pass  # a missing copy is a lost convenience, never a reason to stop
+
+
+def _book_from_store(store: JobStore, work: Path, epub_path: Path):
+    """Rebuild just enough of the book to finish, using only saved state."""
+    job = store.job()
+    chapters = store.chapters()
+    if job is None or not chapters:
+        console.print(
+            f"[red]The source EPUB has moved, and this job has no saved "
+            f"chapters to fall back on:[/red]\n  {epub_path}"
+        )
+        raise typer.Exit(1)
+
+    # An archived copy is better than the database, since it still has the cover.
+    copy = work / SOURCE_COPY
+    if copy.exists():
+        return epubsrc.load(copy)
+
+    cover, media_type = _cover_from_disk(work)
+    return epubsrc.Book(
+        title=job["title"] or "Audiobook",
+        author=job["author"] or "Unknown",
+        language="en",
+        description="",
+        cover=cover,
+        cover_media_type=media_type,
+        chapters=[
+            epubsrc.RawChapter(idx=c.idx, title=c.title, href=c.href or "", text=c.raw_text)
+            for c in chapters
+        ],
+    )
+
+
+def _cover_from_disk(work: Path) -> tuple[bytes | None, str]:
+    """Let a job carry its own cover art, e.g. once the EPUB is gone."""
+    for name, media in (("cover.jpg", "image/jpeg"), ("cover.jpeg", "image/jpeg"),
+                        ("cover.png", "image/png")):
+        candidate = work / name
+        if candidate.exists():
+            return candidate.read_bytes(), media
+    return None, "image/jpeg"
 
 
 def _work_dir(epub_path: Path, out: Path | None) -> Path:
