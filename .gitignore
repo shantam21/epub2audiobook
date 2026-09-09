@@ -1,0 +1,34 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Conversion output — books and audio never belong in the repo
+audiobooks/
+*.m4b
+*.wav
+*.epub
+job.db*
+work/
+prep/
+convert.log*
+
+# The built front end IS committed (see note in README) so that
+# `pip install git+...` gives a working web UI without a Node toolchain.
+!src/epub2audiobook/server/static/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# TypeScript build cache
+*.tsbuildinfo

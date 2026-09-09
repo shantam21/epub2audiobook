@@ -1,0 +1,8 @@
+# Normalise line endings so the repo is consistent regardless of platform.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.m4b binary
+*.wav binary
+*.epub binary
