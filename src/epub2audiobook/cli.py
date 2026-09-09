@@ -802,9 +802,8 @@ def _render(
                 max_workers=workers,
                 initializer=rnd.init_worker,
                 initargs=(settings.lang, settings.voice, settings.speed, threads),
-                # Bounds the resident-set drift a long-running worker
-                # accumulates; without it a multi-hour book can end up swapping.
-                max_tasks_per_child=rnd.MAX_TASKS_PER_WORKER,
+                # No max_tasks_per_child: it deadlocks on Python 3.12 / Windows.
+                # See the note in render.py.
             ) as pool:
                 futures = {pool.submit(rnd.render_chunk, j): j for j in jobs}
                 try:

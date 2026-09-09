@@ -111,3 +111,34 @@ class TestJobIsPicklable:
 
         r = render.ChunkResult(1, 2, "p.wav", 1.5, None)
         assert pickle.loads(pickle.dumps(r)) == r
+
+
+class TestNoWorkerRecycling:
+    """`max_tasks_per_child` deadlocks on Python 3.12 / Windows / spawn.
+
+    Because the pool spreads work evenly, every worker reaches the limit on the
+    same chunk, so the pool tries to replace all of them at once and hangs. It
+    stalled a real 941-chunk book at exactly chunk 300 (2 workers x 150). A
+    30-line reproduction with time.sleep as the payload hangs 3 runs out of 3.
+    """
+
+    def test_the_pool_is_built_without_it(self):
+        import inspect
+
+        from epub2audiobook import cli
+
+        source = inspect.getsource(cli._render)
+        # Comments are allowed to name it -- there is one explaining why it is
+        # absent. Only real code counts.
+        code = "\n".join(
+            line for line in source.splitlines() if not line.strip().startswith("#")
+        )
+        assert "ProcessPoolExecutor" in code, "test is watching the wrong function"
+        assert "max_tasks_per_child" not in code, (
+            "max_tasks_per_child deadlocks on Windows/spawn -- see render.py"
+        )
+
+    def test_the_constant_is_gone(self):
+        from epub2audiobook import render
+
+        assert not hasattr(render, "MAX_TASKS_PER_WORKER")

@@ -27,11 +27,19 @@ _ENGINE: KokoroEngine | None = None
 # ~1.0 GB on Windows, drifting up towards 1.5 GB as a worker runs.
 WORKER_RAM_GB = 1.3
 
-# Recycle each worker after this many chunks. A worker's resident set grows as
-# it runs -- torch caches allocations rather than returning them -- and over a
-# multi-hour book that drift is enough to push a small machine into swap.
-# Restarting a worker costs one model load (~30s) and gives the memory back.
-MAX_TASKS_PER_WORKER = 150
+# Deliberately NOT recycling workers.
+#
+# ProcessPoolExecutor's `max_tasks_per_child` deadlocks on Python 3.12 /
+# Windows / spawn: a 30-line reproduction with `time.sleep` as the payload
+# hangs 3 runs out of 3, and removing the parameter completes in 1.6s. Because
+# the pool spreads work evenly, every worker reaches the limit on the same
+# chunk, so the pool tries to replace all of them at once and never recovers.
+#
+# It was added to bound a memory leak that measurement had already shown was
+# not a leak: a worker's resident set climbs from ~1.0 GB to ~1.5 GB and then
+# settles (+400 MB, then +34 MB over the same interval). Recycling guarded a
+# problem that does not exist, at the cost of a guaranteed hang partway
+# through every long book.
 
 # Share of total RAM we will spend on workers when free memory reads low.
 # Measured: two workers on a 9.8 GB machine settle near 3 GB, about a third.
